@@ -4,86 +4,119 @@
 #
 # ERA5降尺度推理配置文件
 #
-# 支持自动patch切分：当输入尺寸与模型patch尺寸不匹配时，
-# 自动将输入切分成多个patch进行推理，然后拼接还原。
+# =============================================================================
+# 处理流程
+# =============================================================================
+#
+#   输入: 低分辨率ERA5数据 (如25km福建区域, 20x25像素, 4个特征)
+#                   ↓
+#   1. 切分为低分辨率patches (如10x10像素)
+#                   ↓
+#   2. 每个patch双线性插值到模型输入尺寸 (256x256)
+#                   ↓
+#   3. 模型推理
+#                   ↓
+#   4. 输出缩放到对应高分辨率尺寸 (10*25=250像素)
+#                   ↓
+#   5. 所有patches加权融合拼接
+#                   ↓
+#   输出: 高分辨率ERA5数据 (1km福建区域, 500x625像素)
 #
 # =============================================================================
 # 使用示例
 # =============================================================================
 #
-# 1. 基本用法（自动从模型获取patch尺寸）:
-#    python inference_era5.py \
-#        --input_dir ./data/era5_lr/ \
-#        --output_dir ./outputs/era5_hr/ \
-#        --reg_ckpt ./checkpoints/regression.mdlus \
-#        --stats_path ./data/stats.json
+# 福建区域25km ERA5降尺度到1km:
 #
-# 2. 手动指定patch尺寸:
-#    python inference_era5.py \
-#        --input_dir ./data/era5_lr/ \
-#        --output_dir ./outputs/era5_hr/ \
-#        --reg_ckpt ./checkpoints/regression.mdlus \
-#        --stats_path ./data/stats.json \
-#        --patch_shape 448 448 \
-#        --overlap_pix 32
+#   python inference_era5.py \
+#       --input_dir ./data/era5_fujian_25km/ \
+#       --output_dir ./outputs/era5_fujian_1km/ \
+#       --reg_ckpt ./checkpoints/regression.mdlus \
+#       --stats_path ./data/stats.json \
+#       --lr_patch_size 10 10 \
+#       --model_input_size 256 256 \
+#       --scale_factor 25
 #
-# 3. 使用回归+扩散模型，生成10个集合成员:
-#    python inference_era5.py \
-#        --input_dir ./data/era5_lr/ \
-#        --output_dir ./outputs/era5_hr/ \
-#        --reg_ckpt ./checkpoints/regression.mdlus \
-#        --res_ckpt ./checkpoints/diffusion.mdlus \
-#        --stats_path ./data/stats.json \
-#        --num_ensembles 10 \
-#        --patch_shape 448 448
+# 使用扩散模型生成10个集合成员:
+#
+#   python inference_era5.py \
+#       --input_dir ./data/era5_fujian_25km/ \
+#       --output_dir ./outputs/era5_fujian_1km/ \
+#       --reg_ckpt ./checkpoints/regression.mdlus \
+#       --res_ckpt ./checkpoints/diffusion.mdlus \
+#       --stats_path ./data/stats.json \
+#       --lr_patch_size 10 10 \
+#       --model_input_size 256 256 \
+#       --scale_factor 25 \
+#       --num_ensembles 10
 #
 # =============================================================================
 # 参数说明
 # =============================================================================
 #
-# --input_dir       输入文件夹路径（包含单时间戳ERA5 nc文件）
-# --output_dir      输出文件夹路径
-# --reg_ckpt        回归模型检查点路径
-# --res_ckpt        扩散模型检查点路径（可选）
-# --stats_path      归一化统计信息JSON文件路径
-# --num_ensembles   集合成员数量（默认: 1）
-# --num_steps       扩散采样步数（默认: 18）
-# --patch_shape     模型patch尺寸 H W（不指定则从模型自动获取）
-# --overlap_pix     patch重叠像素数（默认: 32，用于平滑拼接）
-# --boundary_pix    边界像素数（默认: 0）
-# --device          计算设备（默认: cuda）
-# --fp16            使用半精度
-# --save_input      在输出nc中保存输入数据
-# --file_pattern    输入文件匹配模式（默认: *.nc）
+# 必需参数:
+#   --input_dir         输入文件夹路径（包含单时间戳ERA5 nc文件）
+#   --output_dir        输出文件夹路径
+#
+# 模型参数:
+#   --reg_ckpt          回归模型检查点路径
+#   --res_ckpt          扩散模型检查点路径（可选）
+#   --stats_path        归一化统计信息JSON文件路径
+#
+# Patch参数:
+#   --lr_patch_size     低分辨率patch尺寸 H W（默认: 10 10）
+#                       例如: 10 10 表示每个patch覆盖10x10个低分辨率像素
+#   --model_input_size  模型输入尺寸 H W（默认: 256 256）
+#                       低分辨率patch会被插值到这个尺寸
+#   --scale_factor      分辨率放大倍数（默认: 25）
+#                       例如: 25km到1km = 25倍
+#   --overlap_lr_pixels 低分辨率patch重叠像素数（默认: 1）
+#                       用于减少拼接边界伪影
+#
+# 推理参数:
+#   --num_ensembles     集合成员数量（默认: 1）
+#   --num_steps         扩散采样步数（默认: 18）
+#   --device            计算设备（默认: cuda）
+#   --fp16              使用半精度
+#
+# 输出参数:
+#   --save_input        在输出nc中保存输入数据
+#   --file_pattern      输入文件匹配模式（默认: *.nc）
 #
 # =============================================================================
-# 输入文件格式要求
+# 输入文件格式
 # =============================================================================
 #
-# - 每个nc文件包含单个时间戳的ERA5数据
-# - 维度: lat/latitude, lon/longitude, (可选: time)
-# - 变量: 气象变量如 t2m, u10, v10 等
-# - 尺寸: 任意尺寸，脚本会自动切分成模型支持的patch
+# 每个nc文件应包含:
+#   - 维度: lat/latitude, lon/longitude, (可选: time)
+#   - 变量: 气象变量（如温度、风速、湿度、气压等）
+#   - 单时间戳数据
+#
+# 示例输入尺寸（福建区域25km）:
+#   - lat: 20个网格点
+#   - lon: 25个网格点
+#   - 变量: t2m, u10, v10, sp (4个特征)
 #
 # =============================================================================
 # 输出文件格式
 # =============================================================================
 #
-# - 每个输入文件对应一个输出文件
-# - 输出文件名: {输入文件名}_downscaled.nc
-# - 维度: time, (ensemble), lat, lon
-# - 变量: 与输入变量对应的高分辨率预测
-# - 格式: 符合CF-1.6规范
+# 输出符合ERA5/CF-1.6规范:
+#   - 文件名: {输入文件名}_downscaled.nc
+#   - 维度: time, (ensemble), lat, lon
+#   - 高分辨率坐标网格
+#   - 可选: 保存原始低分辨率输入
+#
+# 示例输出尺寸（福建区域1km）:
+#   - lat: 500个网格点 (20 * 25)
+#   - lon: 625个网格点 (25 * 25)
 #
 # =============================================================================
-# Patch切分说明
+# 边界处理
 # =============================================================================
 #
-# 当输入图像尺寸大于模型patch尺寸时，脚本会自动：
-# 1. 将输入切分成多个重叠的patch
-# 2. 对每个patch分别进行推理
-# 3. 使用加权平均将所有patch拼接还原为原始尺寸
-#
-# overlap_pix 参数控制相邻patch之间的重叠区域大小，
-# 较大的重叠可以减少拼接边界处的伪影，但会增加计算量。
-# 推荐值: 16-64 像素
+# 对于边界处不足完整patch尺寸的区域:
+#   1. 使用反射padding填充到完整patch尺寸
+#   2. 正常进行插值和推理
+#   3. 拼接时只保留有效区域的输出
+#   4. 使用加权融合消除拼接边界伪影
